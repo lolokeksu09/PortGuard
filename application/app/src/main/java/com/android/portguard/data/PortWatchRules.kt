@@ -14,7 +14,7 @@ object PortWatchRules {
 
     fun isValidKey(value: String): Boolean {
         val match = watchedFormat.matchEntire(value) ?: return false
-        return match.groupValues[2].toIntOrNull() in 1..65535
+        return match.groupValues[2].toIntOrNull()?.let { it in 1..65535 } == true
     }
 
     /** Only a transition absent → observed generates an alert. No initial-scan alert. */

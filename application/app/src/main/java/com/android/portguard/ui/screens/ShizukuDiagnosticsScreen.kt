@@ -75,7 +75,7 @@ fun ShizukuDiagnosticsScreen(
             "Локальные" -> port.scope == PortBindingScope.LOOPBACK
             "TCP" -> port.protocol == "tcp"
             "UDP" -> port.protocol == "udp"
-            "Отслеживаемые" -> PortWatchRules.key(port.protocol, port.port) in state.watchedPorts
+            "Отслеживаемые" -> PortWatchRules.key(port.protocol, port.port)?.let { it in state.watchedPorts } == true
             else -> true
         }
         matchesFilter && (query.isBlank() ||
@@ -224,7 +224,7 @@ fun ShizukuDiagnosticsScreen(
                         key == null -> watchInputError = "Укажи корректный порт от 1 до 65535"
                         key in state.watchedPorts -> watchInputError = "Этот порт уже отслеживается"
                         else -> {
-                            vm.toggleWatchedPort(watchedProtocol, number)
+                            vm.toggleWatchedPort(watchedProtocol, key.substringAfter(':').toInt())
                             watchedPortText = ""
                             watchInputError = ""
                         }
@@ -355,7 +355,7 @@ fun ShizukuDiagnosticsScreen(
                 visible.take(200).forEach { port ->
                     PortRow(
                         port = port,
-                        watched = PortWatchRules.key(port.protocol, port.port) in state.watchedPorts,
+                        watched = PortWatchRules.key(port.protocol, port.port)?.let { it in state.watchedPorts } == true,
                         onToggleWatch = { vm.toggleWatchedPort(port.protocol, port.port) },
                     )
                 }
