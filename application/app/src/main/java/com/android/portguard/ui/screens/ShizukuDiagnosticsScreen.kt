@@ -38,6 +38,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.android.portguard.data.ObservedPort
@@ -55,6 +58,7 @@ fun ShizukuDiagnosticsScreen(
 ) {
     val state by vm.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf("Все") }
     var showRaw by rememberSaveable { mutableStateOf(false) }
@@ -62,8 +66,15 @@ fun ShizukuDiagnosticsScreen(
     var watchedProtocol by rememberSaveable { mutableStateOf("tcp") }
     var watchInputError by rememberSaveable { mutableStateOf("") }
 
-    DisposableEffect(vm) {
-        onDispose { vm.disconnect() }
+    DisposableEffect(vm, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) vm.setMonitoring(false)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            vm.disconnect()
+        }
     }
 
     val snapshot = state.snapshot
