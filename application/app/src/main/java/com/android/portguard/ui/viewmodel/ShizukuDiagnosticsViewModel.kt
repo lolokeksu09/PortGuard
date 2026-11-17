@@ -7,8 +7,13 @@ import android.content.pm.PackageManager
 import android.os.IBinder
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.android.portguard.data.PortChanges
+import com.android.portguard.data.PortDiagnosticSnapshot
+import com.android.portguard.data.PortDiagnosticsParser
 import com.android.portguard.shizuku.IPortDiagnosticsService
 import com.android.portguard.shizuku.PortDiagnosticsService
+import java.text.DateFormat
+import java.util.Date
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,12 +21,23 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import rikka.shizuku.Shizuku
 
-/** Independent of the root module, so no root-only action can be reached via this screen. */
+data class DiagnosticsScanRecord(
+    val time: String,
+    val portsFound: Int,
+    val added: Int?,
+    val disappeared: Int?,
+)
+
+/** A separate, read-only experience. The root-only firewall controls are never exposed. */
 data class ShizukuDiagnosticsUiState(
     val status: String = "Проверяем Shizuku…",
     val connected: Boolean = false,
     val busy: Boolean = false,
-    val output: String = "",
+    val snapshot: PortDiagnosticSnapshot? = null,
+    val changes: PortChanges? = null,
+    val history: List<DiagnosticsScanRecord> = emptyList(),
+    val lastScanTime: String = "",
+    val scanError: String? = null,
 )
 
 class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
@@ -34,9 +50,11 @@ class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
 
     private var service: IPortDiagnosticsService? = null
     private var bound = false
+    private var scanGeneration: Long = 0
 
     private val binderReceived = Shizuku.OnBinderReceivedListener { refreshStatus() }
     private val binderDead = Shizuku.OnBinderDeadListener {
+        scanGeneration++
         service = null
         bound = false
         _uiState.value = _uiState.value.copy(
@@ -48,20 +66,22 @@ class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
     private val permissionResult = Shizuku.OnRequestPermissionResultListener { requestCode, result ->
         if (requestCode == PERMISSION_REQUEST_CODE) {
             if (result == PackageManager.PERMISSION_GRANTED) bindDiagnosticsService()
-            else setStatus("Доступ к Shizuku отклонён. Разрешение можно изменить в Shizuku.")
+            else setStatus("Доступ отклонён. Разрешение можно изменить в приложении Shizuku.")
         }
     }
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             service = IPortDiagnosticsService.Stub.asInterface(binder)
+            val uid = runCatching { Shizuku.getUid() }.getOrDefault(-1)
             _uiState.value = _uiState.value.copy(
-                status = "Shizuku подключён (UID ${runCatching { Shizuku.getUid() }.getOrDefault(-1)}). Защита портов выключена.",
+                status = "Shizuku подключён · UID " + uid + " · защита неактивна",
                 connected = true,
                 busy = false,
             )
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
+            scanGeneration++
             service = null
             bound = false
             _uiState.value = _uiState.value.copy(
@@ -89,7 +109,7 @@ class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
                     "Shizuku работает. Нажми «Подключиться» для диагностики."
                 else -> "Shizuku работает. Требуется разрешение доступа."
             }
-        }.getOrElse { "Shizuku недоступен: ${it.message.orEmpty()}" }
+        }.getOrElse { "Shizuku недоступен: " + it.message.orEmpty() }
         setStatus(status)
     }
 
@@ -110,7 +130,7 @@ class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
                 else -> Shizuku.requestPermission(PERMISSION_REQUEST_CODE)
             }
         } catch (e: Exception) {
-            setStatus("Не удалось подключиться: ${e.message.orEmpty()}")
+            setStatus("Не удалось подключиться: " + e.message.orEmpty())
         }
     }
 
@@ -122,17 +142,57 @@ class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
             Shizuku.bindUserService(args, connection)
         } catch (e: Exception) {
             bound = false
-            _uiState.value = _uiState.value.copy(busy = false, status = "Ошибка подключения: ${e.message.orEmpty()}")
+            _uiState.value = _uiState.value.copy(busy = false, status = "Ошибка подключения: " + e.message.orEmpty())
         }
     }
 
     fun runDiagnostics() {
         val activeService = service ?: return
-        _uiState.value = _uiState.value.copy(busy = true, output = "Выполняется диагностика…")
+        if (_uiState.value.busy) return
+        val generation = ++scanGeneration
+        _uiState.value = _uiState.value.copy(busy = true, scanError = null)
+
         viewModelScope.launch(Dispatchers.IO) {
-            val result = runCatching { activeService.runReadOnlyDiagnostics() }
-                .getOrElse { "Ошибка диагностики: ${it.message.orEmpty()}" }
-            _uiState.value = _uiState.value.copy(busy = false, output = result)
+            val result = runCatching { PortDiagnosticsParser.parse(activeService.runReadOnlyDiagnostics()) }
+            // Ignore a stale Binder response if Shizuku disconnected while scanning.
+            if (generation != scanGeneration || service !== activeService) return@launch
+
+            result.onSuccess { current ->
+                // Do not interpret a failed socket query as "all ports disappeared".
+                if (current.ports.isEmpty() && current.warnings.isNotEmpty()) {
+                    _uiState.value = _uiState.value.copy(
+                        busy = false,
+                        scanError = "Android ограничил доступ к списку портов. Проверь системные сообщения в отчёте.",
+                        snapshot = current,
+                        changes = null,
+                    )
+                    return@onSuccess
+                }
+
+                val previous = _uiState.value.snapshot
+                    ?.takeUnless { it.ports.isEmpty() && it.warnings.isNotEmpty() }
+                val delta = previous?.let { PortDiagnosticsParser.compare(it, current) }
+                val now = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date())
+                val record = DiagnosticsScanRecord(
+                    time = now,
+                    portsFound = current.ports.size,
+                    added = delta?.added?.size,
+                    disappeared = delta?.disappeared?.size,
+                )
+                _uiState.value = _uiState.value.copy(
+                    busy = false,
+                    snapshot = current,
+                    changes = delta,
+                    lastScanTime = now,
+                    scanError = null,
+                    history = (listOf(record) + _uiState.value.history).take(8),
+                )
+            }.onFailure { error ->
+                _uiState.value = _uiState.value.copy(
+                    busy = false,
+                    scanError = "Не удалось выполнить диагностику: " + error.message.orEmpty(),
+                )
+            }
         }
     }
 
@@ -141,6 +201,7 @@ class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun disconnect() {
+        scanGeneration++
         if (bound) runCatching { Shizuku.unbindUserService(args, connection, true) }
         bound = false
         service = null
