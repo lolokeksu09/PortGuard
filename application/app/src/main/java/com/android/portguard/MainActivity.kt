@@ -13,6 +13,9 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
@@ -22,6 +25,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.android.portguard.ui.screens.InstallModuleScreen
 import com.android.portguard.ui.screens.MainHubScreen
 import com.android.portguard.ui.screens.RequirementsScreen
+import com.android.portguard.ui.screens.ShizukuDiagnosticsScreen
 import com.android.portguard.ui.screens.StartupLoadingScreen
 import com.android.portguard.ui.screens.UpdatePendingScreen
 import com.android.portguard.ui.screens.WelcomeScreen
@@ -54,9 +58,15 @@ private fun PortGuardApp(
     vm: InstallerFlowViewModel = viewModel(),
 ) {
     val state by vm.uiState.collectAsStateWithLifecycle()
+    var shizukuOpened by rememberSaveable { mutableStateOf(false) }
 
     BackHandler(enabled = true) {
-        vm.onSystemBack()
+        if (shizukuOpened) shizukuOpened = false else vm.onSystemBack()
+    }
+
+    if (shizukuOpened) {
+        ShizukuDiagnosticsScreen(onBack = { shizukuOpened = false })
+        return
     }
 
     AnimatedContent(
@@ -86,6 +96,7 @@ private fun PortGuardApp(
                     InstallerStep.REQUIREMENTS -> RequirementsScreen(
                         state = state,
                         onRequestRoot = vm::requestRootAndContinue,
+                        onOpenShizuku = { shizukuOpened = true },
                     )
 
                     InstallerStep.UPDATE_PENDING -> UpdatePendingScreen(

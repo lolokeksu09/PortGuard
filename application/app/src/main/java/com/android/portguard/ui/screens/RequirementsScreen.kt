@@ -22,6 +22,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -36,6 +37,7 @@ import com.android.portguard.ui.state.InstallerFlowUiState
 fun RequirementsScreen(
     state: InstallerFlowUiState,
     onRequestRoot: () -> Unit,
+    onOpenShizuku: () -> Unit,
 ) {
     Box(
         modifier = Modifier
@@ -115,6 +117,19 @@ fun RequirementsScreen(
                     }
                 }
             }
+            OutlinedButton(
+                onClick = onOpenShizuku,
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !state.loading,
+            ) {
+                Text("Shizuku · Диагностика без root")
+            }
+            Text(
+                text = "Shizuku не заменяет root: блокировка портов в этом режиме недоступна.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
         }
     }
 }

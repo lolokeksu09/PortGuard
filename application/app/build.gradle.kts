@@ -56,6 +56,8 @@ android {
 
     buildTypes {
         debug {
+            // Install next to the upstream PortGuard APK for safe diagnostics testing.
+            applicationIdSuffix = ".diagnostics"
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("portguard")
             isDebuggable = true
@@ -80,6 +82,7 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        aidl = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.8"
@@ -110,6 +113,10 @@ dependencies {
     implementation("androidx.compose.animation:animation")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.compose.material:material-icons-extended")
+
+    // Shizuku UserService runs our diagnostics with ADB-shell privileges.
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
