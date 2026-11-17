@@ -10,11 +10,15 @@ import androidx.lifecycle.viewModelScope
 import com.android.portguard.data.PortChanges
 import com.android.portguard.data.PortDiagnosticSnapshot
 import com.android.portguard.data.PortDiagnosticsParser
+import com.android.portguard.data.PortWatchRules
 import com.android.portguard.shizuku.IPortDiagnosticsService
 import com.android.portguard.shizuku.PortDiagnosticsService
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -38,10 +42,20 @@ data class ShizukuDiagnosticsUiState(
     val history: List<DiagnosticsScanRecord> = emptyList(),
     val lastScanTime: String = "",
     val scanError: String? = null,
+    val monitoring: Boolean = false,
+    val monitorIntervalSeconds: Int = 30,
+    val watchedPorts: Set<String> = emptySet(),
+    val watchAlerts: List<String> = emptyList(),
 )
 
 class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
-    private val _uiState = MutableStateFlow(ShizukuDiagnosticsUiState())
+    private val watchPreferences = app.getSharedPreferences("portguard_shizuku_diagnostics", Application.MODE_PRIVATE)
+    private val _uiState = MutableStateFlow(
+        ShizukuDiagnosticsUiState(
+            watchedPorts = watchPreferences.getStringSet("watched_ports", emptySet())
+                .orEmpty().filter(PortWatchRules::isValidKey).toSet()
+        )
+    )
     val uiState: StateFlow<ShizukuDiagnosticsUiState> = _uiState.asStateFlow()
 
     private val args = Shizuku.UserServiceArgs(
@@ -51,9 +65,12 @@ class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
     private var service: IPortDiagnosticsService? = null
     private var bound = false
     private var scanGeneration: Long = 0
+    private var monitorJob: Job? = null
+    private var lastUsableSnapshot: PortDiagnosticSnapshot? = null
 
     private val binderReceived = Shizuku.OnBinderReceivedListener { refreshStatus() }
     private val binderDead = Shizuku.OnBinderDeadListener {
+        stopMonitoring()
         scanGeneration++
         service = null
         bound = false
@@ -81,6 +98,7 @@ class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
+            stopMonitoring()
             scanGeneration++
             service = null
             bound = false
@@ -169,10 +187,12 @@ class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
                     return@onSuccess
                 }
 
-                val previous = _uiState.value.snapshot
-                    ?.takeUnless { it.ports.isEmpty() && it.warnings.isNotEmpty() }
+                val previous = lastUsableSnapshot
                 val delta = previous?.let { PortDiagnosticsParser.compare(it, current) }
+                lastUsableSnapshot = current
                 val now = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date())
+                val noticed = previous?.let { PortWatchRules.newlyObserved(it, current, _uiState.value.watchedPorts) }.orEmpty()
+                val alerts = noticed.map { "$now · В списке появился " + it.substringBefore(':').uppercase() + "/" + it.substringAfter(':') }
                 val record = DiagnosticsScanRecord(
                     time = now,
                     portsFound = current.ports.size,
@@ -186,6 +206,7 @@ class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
                     lastScanTime = now,
                     scanError = null,
                     history = (listOf(record) + _uiState.value.history).take(8),
+                    watchAlerts = (alerts + _uiState.value.watchAlerts).take(12),
                 )
             }.onFailure { error ->
                 _uiState.value = _uiState.value.copy(
@@ -196,11 +217,66 @@ class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Foreground monitoring runs only while this diagnostics screen is present. */
+    fun setMonitoring(enabled: Boolean) {
+        if (!enabled) {
+            stopMonitoring()
+            return
+        }
+        if (service == null || !_uiState.value.connected) {
+            setStatus("Сначала подключись через Shizuku.")
+            return
+        }
+        if (monitorJob?.isActive == true) return
+        _uiState.value = _uiState.value.copy(monitoring = true)
+        monitorJob = viewModelScope.launch {
+            while (isActive && _uiState.value.monitoring && _uiState.value.connected) {
+                runDiagnostics()
+                delay(_uiState.value.monitorIntervalSeconds * 1_000L)
+            }
+        }
+    }
+
+    fun setMonitorIntervalSeconds(seconds: Int) {
+        if (seconds !in setOf(15, 30, 60)) return
+        _uiState.value = _uiState.value.copy(monitorIntervalSeconds = seconds)
+    }
+
+    private fun stopMonitoring() {
+        monitorJob?.cancel()
+        monitorJob = null
+        _uiState.value = _uiState.value.copy(monitoring = false)
+    }
+
+    fun toggleWatchedPort(protocol: String, port: Int) {
+        val key = PortWatchRules.key(protocol, port) ?: return
+        val current = _uiState.value.watchedPorts
+        val next = if (key in current) current - key else current + key
+        storeWatchedPorts(next)
+    }
+
+    fun removeWatchedPort(key: String) {
+        if (PortWatchRules.isValidKey(key)) {
+            storeWatchedPorts(_uiState.value.watchedPorts - key)
+        }
+    }
+
+    private fun storeWatchedPorts(next: Set<String>) {
+        // Copy the set: SharedPreferences can retain references to a mutable value.
+        watchPreferences.edit().putStringSet("watched_ports", next.toSet()).apply()
+        _uiState.value = _uiState.value.copy(watchedPorts = next.toSet())
+    }
+
+    fun clearWatchAlerts() {
+        _uiState.value = _uiState.value.copy(watchAlerts = emptyList())
+    }
+
     private fun setStatus(text: String) {
         _uiState.value = _uiState.value.copy(status = text)
     }
 
     fun disconnect() {
+        stopMonitoring()
         scanGeneration++
         if (bound) runCatching { Shizuku.unbindUserService(args, connection, true) }
         bound = false

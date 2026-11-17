@@ -2,6 +2,8 @@ package com.android.portguard.ui.screens
 
 import android.content.Intent
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -41,9 +43,10 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.android.portguard.data.ObservedPort
 import com.android.portguard.data.PortBindingScope
 import com.android.portguard.data.PortDiagnosticSnapshot
+import com.android.portguard.data.PortWatchRules
 import com.android.portguard.ui.viewmodel.ShizukuDiagnosticsViewModel
 
-private val filters = listOf("Все", "Сетевые", "Локальные", "TCP", "UDP")
+private val filters = listOf("Все", "Сетевые", "Локальные", "TCP", "UDP", "Отслеживаемые")
 
 @Composable
 fun ShizukuDiagnosticsScreen(
@@ -55,6 +58,9 @@ fun ShizukuDiagnosticsScreen(
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf("Все") }
     var showRaw by rememberSaveable { mutableStateOf(false) }
+    var watchedPortText by rememberSaveable { mutableStateOf("") }
+    var watchedProtocol by rememberSaveable { mutableStateOf("tcp") }
+    var watchInputError by rememberSaveable { mutableStateOf("") }
 
     DisposableEffect(vm) {
         onDispose { vm.disconnect() }
@@ -69,6 +75,7 @@ fun ShizukuDiagnosticsScreen(
             "Локальные" -> port.scope == PortBindingScope.LOOPBACK
             "TCP" -> port.protocol == "tcp"
             "UDP" -> port.protocol == "udp"
+            "Отслеживаемые" -> PortWatchRules.key(port.protocol, port.port) in state.watchedPorts
             else -> true
         }
         matchesFilter && (query.isBlank() ||
@@ -142,6 +149,132 @@ fun ShizukuDiagnosticsScreen(
         }
         state.scanError?.let { err ->
             Text(err, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+        }
+
+        if (state.connected) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Автоматическое наблюдение", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Повторяет проверки, только пока открыт этот экран. Не блокирует соединения.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        listOf(15, 30, 60).forEach { interval ->
+                            FilterChip(
+                                selected = state.monitorIntervalSeconds == interval,
+                                onClick = { vm.setMonitorIntervalSeconds(interval) },
+                                label = { Text("$interval сек") },
+                            )
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = { vm.setMonitoring(!state.monitoring) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(if (state.monitoring) "Остановить наблюдение" else "Начать наблюдение")
+                    }
+                }
+            }
+        }
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Отслеживаемые порты", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Выбери порты, появление которых важно заметить. Список сохраняется на устройстве.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("tcp", "udp").forEach { protocol ->
+                        FilterChip(
+                            selected = watchedProtocol == protocol,
+                            onClick = { watchedProtocol = protocol },
+                            label = { Text(protocol.uppercase()) },
+                        )
+                    }
+                }
+                OutlinedTextField(
+                    value = watchedPortText,
+                    onValueChange = { watchedPortText = it.take(5).filter(Char::isDigit); watchInputError = "" },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Номер порта · 1–65535") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    isError = watchInputError.isNotBlank(),
+                )
+                if (watchInputError.isNotBlank()) {
+                    Text(watchInputError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+                OutlinedButton(onClick = {
+                    val number = watchedPortText.toIntOrNull()
+                    val key = number?.let { PortWatchRules.key(watchedProtocol, it) }
+                    when {
+                        key == null -> watchInputError = "Укажи корректный порт от 1 до 65535"
+                        key in state.watchedPorts -> watchInputError = "Этот порт уже отслеживается"
+                        else -> {
+                            vm.toggleWatchedPort(watchedProtocol, number)
+                            watchedPortText = ""
+                            watchInputError = ""
+                        }
+                    }
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Добавить порт")
+                }
+                if (state.watchedPorts.isEmpty()) {
+                    Text("Список пуст", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    state.watchedPorts.sorted().forEach { watched ->
+                        val observed = snapshot?.ports?.any {
+                            PortWatchRules.key(it.protocol, it.port) == watched
+                        } == true
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(watched.replace(":", " / ").uppercase(), fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    when {
+                                        snapshot == null -> "Нет данных текущей проверки"
+                                        snapshot.ports.isEmpty() && snapshot.warnings.isNotEmpty() -> "Доступность списка неизвестна"
+                                        observed -> "Обнаружен в последней проверке"
+                                        else -> "Не обнаружен (не означает закрыт)"
+                                    },
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                            TextButton(onClick = { vm.removeWatchedPort(watched) }) { Text("Убрать") }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (state.watchAlerts.isNotEmpty()) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Новые появления в отслеживаемых", style = MaterialTheme.typography.titleSmall)
+                    Text("Это изменение наблюдаемого списка, а не доказательство угрозы.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                    state.watchAlerts.take(8).forEach { notice ->
+                        Text(notice, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
+                    }
+                    TextButton(onClick = vm::clearWatchAlerts) { Text("Очистить события") }
+                }
+            }
         }
 
         if (snapshot != null) {
@@ -219,7 +352,13 @@ fun ShizukuDiagnosticsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
-                visible.take(200).forEach { port -> PortRow(port) }
+                visible.take(200).forEach { port ->
+                    PortRow(
+                        port = port,
+                        watched = PortWatchRules.key(port.protocol, port.port) in state.watchedPorts,
+                        onToggleWatch = { vm.toggleWatchedPort(port.protocol, port.port) },
+                    )
+                }
                 if (visible.size > 200) {
                     Text(
                         "Показаны первые 200 записей. Уточни поиск для остальных.",
@@ -325,7 +464,7 @@ private fun MetricCard(label: String, value: String, modifier: Modifier = Modifi
 }
 
 @Composable
-private fun PortRow(port: ObservedPort) {
+private fun PortRow(port: ObservedPort, watched: Boolean, onToggleWatch: () -> Unit) {
     val (scopeLabel, scopeDescription) = when (port.scope) {
         PortBindingScope.LOOPBACK -> "Только устройство" to "127.0.0.1 / localhost"
         PortBindingScope.ALL_INTERFACES -> "Все интерфейсы" to "Возможен доступ с других устройств; нужны сетевые проверки"
@@ -351,6 +490,9 @@ private fun PortRow(port: ObservedPort) {
             Text(port.address, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
             Text(scopeLabel, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurface)
             Text(scopeDescription, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            TextButton(onClick = onToggleWatch) {
+                Text(if (watched) "Убрать из отслеживаемых" else "Отслеживать этот порт")
+            }
         }
     }
 }
