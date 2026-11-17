@@ -16,6 +16,8 @@ data class ObservedPort(
     val address: String,
     val port: Int,
     val scope: PortBindingScope,
+    val processName: String? = null,
+    val processPid: Int? = null,
 ) {
     val identity: String get() = "$protocol|$address|$port"
 }
@@ -39,6 +41,8 @@ data class PortChanges(
 
 object PortDiagnosticsParser {
     private val whitespace = Regex("\\s+")
+    // Example from ss -p: users:(("adbd",pid=312,fd=7))
+    private val processPattern = Regex("""users:\(\("([^"]+)",pid=([0-9]+)""")
 
     fun parse(raw: String): PortDiagnosticSnapshot {
         val ports = linkedMapOf<String, ObservedPort>()
@@ -83,8 +87,16 @@ object PortDiagnosticsParser {
                         PortBindingScope.ALL_INTERFACES
                     else -> PortBindingScope.SPECIFIC_ADDRESS
                 }
-                val item = ObservedPort(protocol, tokens[1], host, parsedPort, scope)
-                ports[item.identity] = item
+                // ADB-shell may be denied process metadata; missing owner means unknown.
+                val processMatch = processPattern.find(trimmed)
+                val pid = processMatch?.groupValues?.getOrNull(2)?.toIntOrNull()?.takeIf { it > 0 }
+                val name = processMatch?.groupValues?.getOrNull(1)?.take(80)?.takeIf { !it.isNullOrBlank() }
+                val item = ObservedPort(protocol, tokens[1], host, parsedPort, scope, name, pid)
+                val previousItem = ports[item.identity]
+                // Keep an owner if an otherwise duplicate entry omits its metadata.
+                if (previousItem?.processName == null || item.processName != null) {
+                    ports[item.identity] = item
+                }
             } else if (section == "addresses" && tokens.size >= 4) {
                 if (tokens[2] != "inet" && tokens[2] != "inet6") continue
                 val item = ObservedNetworkAddress(

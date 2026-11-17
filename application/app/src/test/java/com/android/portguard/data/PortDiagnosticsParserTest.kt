@@ -32,6 +32,21 @@ class PortDiagnosticsParserTest {
         assertTrue(result.warnings.any { it.contains("Permission denied") })
     }
 
+    @Test fun parsesOnlyExplicitProcessMetadataWithoutInventingApplicationOwners() {
+        val raw = """
+            --- Listening TCP/UDP sockets ---
+            tcp LISTEN 0 0 0.0.0.0:5555 0.0.0.0:* users:(("adbd",pid=1234,fd=9))
+            tcp LISTEN 0 0 127.0.0.1:8765 0.0.0.0:*
+        """.trimIndent()
+        val snapshot = PortDiagnosticsParser.parse(raw)
+        val owned = snapshot.ports.first { it.port == 5555 }
+        assertEquals("adbd", owned.processName)
+        assertEquals(1234, owned.processPid)
+        val unknown = snapshot.ports.first { it.port == 8765 }
+        assertEquals(null, unknown.processName)
+        assertEquals(null, unknown.processPid)
+    }
+
     @Test fun tracksNewAndDisappearingPorts() {
         val previous = PortDiagnosticsParser.parse(example)
         val next = PortDiagnosticsParser.parse(

@@ -24,12 +24,19 @@ class PortDiagnosticsService : IPortDiagnosticsService.Stub() {
         appendLine()
 
         val probes = listOf(
-            "Listening TCP/UDP sockets" to "ss -ltnu",
+            "Listening TCP/UDP sockets" to "ss -ltnup",
             "Network addresses" to "ip -o addr show",
         )
         for ((title, command) in probes) {
             appendLine("--- $title ---")
-            appendLine(runProbe(command))
+            val response = runProbe(command)
+            // Some Android builds do not support or allow ss -p. Keep the basic
+            // socket view usable even when process ownership is unavailable.
+            appendLine(
+                if (title == "Listening TCP/UDP sockets" && response.startsWith("Unavailable")) {
+                    "Process details unavailable. Retrying without process metadata.\n" + runProbe("ss -ltnu")
+                } else response
+            )
             appendLine()
         }
     }

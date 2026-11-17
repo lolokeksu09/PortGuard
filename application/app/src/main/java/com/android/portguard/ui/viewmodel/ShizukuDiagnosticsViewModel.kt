@@ -11,6 +11,9 @@ import com.android.portguard.data.PortChanges
 import com.android.portguard.data.PortDiagnosticSnapshot
 import com.android.portguard.data.PortDiagnosticsParser
 import com.android.portguard.data.PortWatchRules
+import com.android.portguard.data.PortWatchEvent
+import com.android.portguard.data.PortWatchHistoryRepository
+import com.android.portguard.notifications.PortWatchNotifier
 import com.android.portguard.shizuku.IPortDiagnosticsService
 import com.android.portguard.shizuku.PortDiagnosticsService
 import java.text.DateFormat
@@ -46,14 +49,17 @@ data class ShizukuDiagnosticsUiState(
     val monitorIntervalSeconds: Int = 30,
     val watchedPorts: Set<String> = emptySet(),
     val watchAlerts: List<String> = emptyList(),
+    val savedEvents: List<PortWatchEvent> = emptyList(),
 )
 
 class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
     private val watchPreferences = app.getSharedPreferences("portguard_shizuku_diagnostics", Application.MODE_PRIVATE)
+    private val historyRepository = PortWatchHistoryRepository(app.applicationContext)
     private val _uiState = MutableStateFlow(
         ShizukuDiagnosticsUiState(
             watchedPorts = watchPreferences.getStringSet("watched_ports", emptySet())
-                .orEmpty().filter(PortWatchRules::isValidKey).toSet()
+                .orEmpty().filter(PortWatchRules::isValidKey).toSet(),
+            savedEvents = historyRepository.read()
         )
     )
     val uiState: StateFlow<ShizukuDiagnosticsUiState> = _uiState.asStateFlow()
@@ -193,6 +199,12 @@ class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
                 val now = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date())
                 val noticed = previous?.let { PortWatchRules.newlyObserved(it, current, _uiState.value.watchedPorts) }.orEmpty()
                 val alerts = noticed.map { "$now · В списке появился " + it.substringBefore(':').uppercase() + "/" + it.substringAfter(':') }
+                val saved = if (noticed.isNotEmpty()) historyRepository.append(noticed, System.currentTimeMillis())
+                    else _uiState.value.savedEvents
+                // Only explicit matches are shown; Android may conceal processes.
+                if (noticed.isNotEmpty()) {
+                    PortWatchNotifier.notifyAppeared(getApplication<Application>(), noticed)
+                }
                 val record = DiagnosticsScanRecord(
                     time = now,
                     portsFound = current.ports.size,
@@ -207,6 +219,7 @@ class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
                     scanError = null,
                     history = (listOf(record) + _uiState.value.history).take(8),
                     watchAlerts = (alerts + _uiState.value.watchAlerts).take(12),
+                    savedEvents = saved,
                 )
             }.onFailure { error ->
                 _uiState.value = _uiState.value.copy(
@@ -269,6 +282,11 @@ class ShizukuDiagnosticsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearWatchAlerts() {
         _uiState.value = _uiState.value.copy(watchAlerts = emptyList())
+    }
+
+    fun clearSavedHistory() {
+        historyRepository.clear()
+        _uiState.value = _uiState.value.copy(savedEvents = emptyList())
     }
 
     private fun setStatus(text: String) {

@@ -1,6 +1,14 @@
 package com.android.portguard.ui.screens
 
 import android.content.Intent
+import android.Manifest
+import android.os.Build
+import com.android.portguard.notifications.PortWatchNotifier
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.AlertDialog
+import java.text.DateFormat
+import java.util.Date
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
@@ -59,16 +67,22 @@ fun ShizukuDiagnosticsScreen(
     val state by vm.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    var canNotify by rememberSaveable { mutableStateOf(PortWatchNotifier.canNotify(context)) }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { canNotify = PortWatchNotifier.canNotify(context) }
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf("Все") }
     var showRaw by rememberSaveable { mutableStateOf(false) }
     var watchedPortText by rememberSaveable { mutableStateOf("") }
     var watchedProtocol by rememberSaveable { mutableStateOf("tcp") }
     var watchInputError by rememberSaveable { mutableStateOf("") }
+    var confirmClearHistory by rememberSaveable { mutableStateOf(false) }
 
     DisposableEffect(vm, lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) vm.setMonitoring(false)
+            if (event == Lifecycle.Event.ON_RESUME) canNotify = PortWatchNotifier.canNotify(context)
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
@@ -184,6 +198,20 @@ fun ShizukuDiagnosticsScreen(
                                 onClick = { vm.setMonitorIntervalSeconds(interval) },
                                 label = { Text("$interval сек") },
                             )
+                        }
+                    }
+                    if (!canNotify) {
+                        Text(
+                            "Уведомления выключены. События всё равно сохраняются в приложении.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (Build.VERSION.SDK_INT >= 33) {
+                            TextButton(onClick = {
+                                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            }) {
+                                Text("Разрешить уведомления")
+                            }
                         }
                     }
                     OutlinedButton(
@@ -414,6 +442,35 @@ fun ShizukuDiagnosticsScreen(
                 }
             }
 
+            if (state.savedEvents.isNotEmpty()) {
+                Text(
+                    "ИСТОРИЯ СОБЫТИЙ · НА УСТРОЙСТВЕ",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+                    Column(modifier = Modifier.padding(16.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Появления отслеживаемых портов", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "Последние 100 событий сохраняются между запусками. Они не отправляются на сервер.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        state.savedEvents.take(12).forEach { event ->
+                            Text(
+                                DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
+                                    .format(Date(event.occurredAtMillis)) + " · " +
+                                    event.portKey.uppercase().replace(":", "/"),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        TextButton(onClick = { confirmClearHistory = true }) {
+                            Text("Очистить историю")
+                        }
+                    }
+                }
+            }
+
             if (state.history.isNotEmpty()) {
                 Text("ИСТОРИЯ ЭТОЙ СЕССИИ", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 state.history.forEach { item ->
@@ -454,6 +511,20 @@ fun ShizukuDiagnosticsScreen(
                     }
                 }
             }
+        }
+        if (confirmClearHistory) {
+            AlertDialog(
+                onDismissRequest = { confirmClearHistory = false },
+                title = { Text("Очистить историю?") },
+                text = { Text("Локальные события будут удалены без возможности восстановления. Список отслеживаемых портов останется.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        vm.clearSavedHistory()
+                        confirmClearHistory = false
+                    }) { Text("Удалить") }
+                },
+                dismissButton = { TextButton(onClick = { confirmClearHistory = false }) { Text("Отмена") } },
+            )
         }
         OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
             Text("Вернуться к Root-режиму")
@@ -501,6 +572,12 @@ private fun PortRow(port: ObservedPort, watched: Boolean, onToggleWatch: () -> U
             Text(port.address, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
             Text(scopeLabel, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurface)
             Text(scopeDescription, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val processLabel = if (port.processName != null) {
+                "Процесс: " + port.processName +
+                    (port.processPid?.let { " · PID $it" } ?: "") +
+                    " (не подтверждённое приложение)"
+            } else "Процесс: не определён Android"
+            Text(processLabel, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             TextButton(onClick = onToggleWatch) {
                 Text(if (watched) "Убрать из отслеживаемых" else "Отслеживать этот порт")
             }
@@ -515,7 +592,8 @@ private fun formatDiagnosticsReport(snapshot: PortDiagnosticSnapshot): String = 
     appendLine("Observed ports: " + snapshot.ports.size)
     appendLine()
     snapshot.ports.forEach { item ->
-        appendLine(item.protocol.uppercase() + "/" + item.port + " " + item.address + " [" + item.scope.name + "]")
+        appendLine(item.protocol.uppercase() + "/" + item.port + " " + item.address + " [" + item.scope.name + "]" +
+            (item.processName?.let { " process=$it pid=${item.processPid ?: "unknown"}" } ?: " owner=unknown"))
     }
     appendLine()
     appendLine("Network interfaces:")
